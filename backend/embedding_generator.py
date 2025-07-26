@@ -6,6 +6,7 @@ Generates embeddings for text chunks and stores them in Qdrant vector database.
 import json
 import logging
 import uuid
+import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from sentence_transformers import SentenceTransformer
@@ -14,7 +15,6 @@ from qdrant_client.models import Distance, VectorParams, PointStruct
 import numpy as np
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
@@ -53,33 +53,37 @@ class EmbeddingGenerator:
         self._initialize_qdrant()
     
     def _initialize_model(self):
-        """Initialize the sentence transformer model."""
+        """Initialize the sentence transformer model with timing."""
+        start_time = time.time()
         try:
             logger.info(f"Loading embedding model: {self.model_name}")
             self.model = SentenceTransformer(self.model_name)
-            logger.info(f"✅ Model loaded successfully. Embedding dimension: {self.model.get_sentence_embedding_dimension()}")
+            load_time = time.time() - start_time
+            logger.info(f"Model loaded in {load_time:.2f}s - Dimension: {self.model.get_sentence_embedding_dimension()}")
         except Exception as e:
-            logger.error(f"❌ Failed to load model: {e}")
+            logger.error(f"Failed to load model: {e}")
             raise e
     
     def _initialize_qdrant(self):
-        """Initialize Qdrant client and create collection if needed."""
+        """Initialize Qdrant client with timing."""
+        start_time = time.time()
         try:
             logger.info("Connecting to Qdrant...")
             self.qdrant_client = QdrantClient(
                 url=self.qdrant_url,
                 api_key=self.qdrant_api_key,
             )
-            
+
             # Test connection
             collections = self.qdrant_client.get_collections()
-            logger.info(f"✅ Connected to Qdrant. Existing collections: {[c.name for c in collections.collections]}")
-            
+            connect_time = time.time() - start_time
+            logger.info(f"Connected to Qdrant in {connect_time:.2f}s - Collections: {len(collections.collections)}")
+
             # Create collection if it doesn't exist
             self._ensure_collection_exists()
-            
+
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Qdrant: {e}")
+            logger.error(f"Failed to connect to Qdrant: {e}")
             raise e
     
     def _ensure_collection_exists(self):
@@ -149,22 +153,16 @@ class EmbeddingGenerator:
             raise e
     
     def generate_embeddings(self, texts: List[str]) -> np.ndarray:
-        """
-        Generate embeddings for a list of texts.
-        
-        Args:
-            texts: List of text strings to embed
-            
-        Returns:
-            numpy array of embeddings
-        """
+        """Generate embeddings with timing."""
+        start_time = time.time()
         try:
             logger.info(f"Generating embeddings for {len(texts)} texts...")
             embeddings = self.model.encode(texts, show_progress_bar=True)
-            logger.info(f"✅ Generated {len(embeddings)} embeddings")
+            generation_time = time.time() - start_time
+            logger.info(f"Generated {len(embeddings)} embeddings in {generation_time:.2f}s")
             return embeddings
         except Exception as e:
-            logger.error(f"❌ Failed to generate embeddings: {e}")
+            logger.error(f"Failed to generate embeddings: {e}")
             raise e
     
     def store_embeddings_batch(self,
@@ -184,8 +182,9 @@ class EmbeddingGenerator:
         Returns:
             True if successful
         """
+        start_time = time.time()
         try:
-            logger.info(f"Storing {len(chunks)} embeddings with rich metadata in Qdrant...")
+            logger.info(f"Storing {len(chunks)} embeddings in Qdrant...")
 
             # Prepare points for upload with enhanced metadata
             points = []
@@ -510,28 +509,4 @@ class EmbeddingGenerator:
             logger.error(f"❌ Failed to search with filter: {e}")
             return []
 
-def main():
-    """Main function for testing the embedding generator."""
-    # Initialize the embedding generator
-    generator = EmbeddingGenerator()
-    
-    # Test with the JSON file we created
-    json_file = "output_0389da93_20250724_202310.json"
-    
-    if generator.process_json_file(json_file):
-        print("✅ Embedding generation and storage completed successfully!")
-        
-        # Test search functionality
-        test_query = "What is the volume of a cube?"
-        results = generator.search_similar_chunks(test_query, limit=3)
-        
-        print(f"\n🔍 Search results for: '{test_query}'")
-        for i, result in enumerate(results, 1):
-            print(f"{i}. Score: {result['score']:.3f} | Page: {result['page']} | Tokens: {result['token_count']}")
-            print(f"   Content: {result['content'][:100]}...")
-            print()
-    else:
-        print("❌ Failed to process embeddings")
 
-if __name__ == "__main__":
-    main()

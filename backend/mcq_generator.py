@@ -6,13 +6,13 @@ Implements Steps 3-5: Sampling/Compression, Prompt Construction, and LLM Integra
 import json
 import logging
 import asyncio
+import time
 from typing import List, Dict, Any, Optional
 import tiktoken
 import google.generativeai as genai
 from embedding_generator import EmbeddingGenerator
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MCQGenerator:
@@ -41,12 +41,11 @@ class MCQGenerator:
         # Initialize Gemini
         if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
-            # Use the correct model name for Gemini 1.5
             self.model = genai.GenerativeModel('gemini-1.5-flash')
-            logger.info("✅ Gemini API configured with gemini-1.5-flash")
+            logger.info("Gemini API configured")
         else:
             self.model = None
-            logger.warning("⚠️ No Gemini API key provided")
+            logger.warning("No Gemini API key provided")
         
         # Initialize embedding generator for chunk retrieval
         self.embedding_generator = EmbeddingGenerator()
@@ -122,7 +121,8 @@ class MCQGenerator:
         if not candidate_chunks:
             logger.warning("No candidate chunks provided")
             return ""
-        
+
+        start_time = time.time()
         token_budget = token_budget or self.token_limit
         logger.info(f"Processing {len(candidate_chunks)} chunks with {token_budget} token budget")
         
@@ -495,45 +495,4 @@ Important: Return ONLY the JSON array, no additional text or formatting."""
                 'metadata': {}
             }
 
-def main():
-    """Test the MCQ generator"""
-    import os
-    from dotenv import load_dotenv
 
-    load_dotenv()
-
-    # Initialize generator
-    gemini_api_key = os.getenv('GEMINI_API_KEY')
-    if not gemini_api_key:
-        print("❌ GEMINI_API_KEY not found in environment")
-        return
-
-    generator = MCQGenerator(gemini_api_key=gemini_api_key)
-
-    async def test_generation():
-        # Test MCQ generation
-        result = await generator.generate_mcqs_from_search(
-            query="What is the volume of a cube?",
-            num_questions=3,
-            difficulty="medium",
-            bloom_level="application"
-        )
-
-        if 'error' in result:
-            print(f"❌ Error: {result['error']}")
-        else:
-            print(f"✅ Generated {len(result['mcqs'])} MCQs")
-            print(f"📊 Metadata: {result['metadata']}")
-
-            for i, mcq in enumerate(result['mcqs'], 1):
-                print(f"\n{i}. {mcq['question']}")
-                for j, option in enumerate(mcq['options']):
-                    print(f"   {chr(65+j)}. {option}")
-                print(f"   Answer: {mcq['answer']}")
-                print(f"   Explanation: {mcq['explanation']}")
-
-    # Run test
-    asyncio.run(test_generation())
-
-if __name__ == "__main__":
-    main()

@@ -20,24 +20,29 @@ os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 load_dotenv()
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 CORS(app, resources={r"/*": {"origins": "http://localhost:8081"}})
 
 # Configuration from environment variables
 AZURE_CONN_STR = os.getenv('AZURE_CONN_STR')
 CONTAINER_NAME = os.getenv('CONTAINER_NAME', 'pdfs')
 BLOB_BASE_URL = os.getenv('BLOB_BASE_URL')
+MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
 
 # Validate required environment variables
-if not AZURE_CONN_STR:
-    app.logger.error("AZURE_CONN_STR not found in environment variables")
-if not BLOB_BASE_URL:
-    app.logger.error("BLOB_BASE_URL not found in environment variables")
+required_vars = {
+    'AZURE_CONN_STR': AZURE_CONN_STR,
+    'BLOB_BASE_URL': BLOB_BASE_URL,
+    'MISTRAL_API_KEY': MISTRAL_API_KEY
+}
 
-# Mistral API configuration
-MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
-if not MISTRAL_API_KEY:
-    app.logger.warning("MISTRAL_API_KEY not found in environment variables")
+for var_name, var_value in required_vars.items():
+    if not var_value:
+        logger.error(f"Required environment variable {var_name} not found")
 
 # Initialize Mistral client
 mistral_client = Mistral(api_key=MISTRAL_API_KEY) if MISTRAL_API_KEY else None
@@ -50,27 +55,31 @@ text_chunker = TextChunker(
     overlap_percentage=0.1
 )
 
-# Initialize components (lazy loading to avoid startup delays)
+# Global components (lazy loading)
 embedding_generator = None
 mcq_generator = None
 
 def get_embedding_generator():
-    """Get or initialize the embedding generator (lazy loading)"""
+    """Get or initialize the embedding generator with timing"""
     global embedding_generator
     if embedding_generator is None:
-        app.logger.info("Initializing Qdrant-based embedding generator...")
+        start_time = time.time()
+        logger.info("Initializing Qdrant embedding generator...")
         embedding_generator = EmbeddingGenerator()
-        app.logger.info("✅ Qdrant embedding generator initialized")
+        init_time = time.time() - start_time
+        logger.info(f"Embedding generator initialized in {init_time:.2f}s")
     return embedding_generator
 
 def get_mcq_generator():
-    """Get or initialize the MCQ generator (lazy loading)"""
+    """Get or initialize the MCQ generator with timing"""
     global mcq_generator
     if mcq_generator is None:
-        app.logger.info("Initializing MCQ generator...")
+        start_time = time.time()
+        logger.info("Initializing MCQ generator...")
         gemini_api_key = os.getenv('GEMINI_API_KEY')
         mcq_generator = MCQGenerator(gemini_api_key=gemini_api_key)
-        app.logger.info("✅ MCQ generator initialized")
+        init_time = time.time() - start_time
+        logger.info(f"MCQ generator initialized in {init_time:.2f}s")
     return mcq_generator
 
 # In-memory storage for extracted text and chunks (in production, use a proper database)
@@ -207,31 +216,30 @@ def _save_json_output(job_id, job_data):
         app.logger.error(f"❌ Failed to auto-save JSON: {e}")
 
 def extract_text_with_mistral_ocr(blob_url, job_id, page_from=None, page_to=None):
-    """
-    Extract text from PDF using Mistral's Document OCR API and process it
-    """
+    """Extract text from PDF using Mistral OCR with latency tracking"""
     if not mistral_client:
         raise Exception("Mistral API key not configured")
 
+    ocr_start_time = time.time()
+
     try:
-        app.logger.info(f"Starting OCR processing for job {job_id} with blob URL: {blob_url}")
+        logger.info(f"Starting OCR processing - Job: {job_id}")
 
         # Download PDF from blob storage
-        app.logger.info(f"Downloading PDF from blob storage for job {job_id}")
+        download_start = time.time()
         pdf_content = retrieve_pdf_from_blob(blob_url)
+        download_time = time.time() - download_start
+        logger.info(f"PDF downloaded in {download_time:.2f}s")
 
-        # Note: PDF page extraction would be here, but Mistral OCR processes entire PDF
-        # The filtering happens in text processing stage instead
         extraction_metadata = {
             'extraction_performed': False,
-            'note': 'Mistral OCR processes entire PDF, filtering happens in text processing',
             'requested_pages': f"{page_from}-{page_to}" if page_from or page_to else "all"
         }
 
         # Convert PDF to base64
         import base64
         base64_pdf = base64.b64encode(pdf_content).decode('utf-8')
-        app.logger.info(f"Prepared PDF for OCR - job {job_id}, size: {len(base64_pdf)} characters")
+        logger.info(f"PDF prepared for OCR - Size: {len(base64_pdf)} chars")
 
         # Call Mistral OCR API with base64 encoded PDF
         ocr_response = mistral_client.ocr.process(
@@ -447,16 +455,20 @@ def extract_text_with_mistral_ocr(blob_url, job_id, page_from=None, page_to=None
 
 @app.route('/generate-mcq', methods=['POST'])
 def generate_mcq():
+    """Process PDF and generate embeddings with latency tracking"""
+    start_time = time.time()
+
     pdf_file = request.files.get('pdf')
     page_from = request.form.get('from')
     page_to = request.form.get('to')
-    num_questions = request.form.get('num_questions')
 
     if not pdf_file:
         return {'error': 'No PDF file provided'}, 400
 
     filename = secure_filename(pdf_file.filename)
-    job_id = str(uuid.uuid4())  # Generate job ID
+    job_id = str(uuid.uuid4())
+
+    logger.info(f"Starting PDF processing - Job: {job_id}, File: {filename}")
 
     # Convert page parameters to integers
     try:
@@ -466,44 +478,46 @@ def generate_mcq():
         page_from_int = None
         page_to_int = None
 
-    # Save original PDF to temp file
+    # Step 1: PDF Page Extraction
+    extraction_start = time.time()
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
         pdf_file.save(tmp)
         original_tmp_path = tmp.name
 
-    # Extract requested pages BEFORE uploading to blob
     extracted_tmp_path = None
     try:
         if page_from_int is not None or page_to_int is not None:
-            app.logger.info(f"Extracting pages {page_from_int}-{page_to_int} from PDF before upload")
+            logger.info(f"Extracting pages {page_from_int}-{page_to_int}")
             extracted_tmp_path = _extract_pdf_pages(original_tmp_path, page_from_int, page_to_int)
             upload_path = extracted_tmp_path
-            app.logger.info(f"Successfully extracted pages, will upload clipped PDF")
         else:
-            app.logger.info("No page range specified, uploading entire PDF")
             upload_path = original_tmp_path
     except Exception as extract_error:
-        app.logger.error(f"Failed to extract pages: {extract_error}")
-        # Fallback to original PDF if extraction fails
+        logger.error(f"Page extraction failed: {extract_error}")
         upload_path = original_tmp_path
 
+    extraction_time = time.time() - extraction_start
+    logger.info(f"Page extraction completed in {extraction_time:.2f}s")
+
+    # Step 2: Azure Blob Upload
+    upload_start = time.time()
     try:
         blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONN_STR)
         container_client = blob_service_client.get_container_client(CONTAINER_NAME)
 
-        # Upload the extracted/clipped PDF (not the original!)
         with open(upload_path, 'rb') as pdf_data:
             container_client.upload_blob(
                 name=filename,
                 data=pdf_data,
                 overwrite=True,
-                timeout=60  # 60 second timeout
+                timeout=60
             )
 
         blob_url = BLOB_BASE_URL + filename
-        app.logger.info(f"Uploaded {'clipped' if extracted_tmp_path else 'original'} PDF to Azure Blob Storage: {blob_url}")
+        upload_time = time.time() - upload_start
+        logger.info(f"PDF uploaded to Azure in {upload_time:.2f}s")
     except Exception as upload_error:
-        app.logger.error(f"Failed to upload PDF to Azure: {upload_error}")
+        logger.error(f"Azure upload failed: {upload_error}")
         return {'error': f'Failed to upload PDF: {str(upload_error)}'}, 500
     finally:
         # Clean up temp files
@@ -511,36 +525,27 @@ def generate_mcq():
             os.remove(original_tmp_path)
             if extracted_tmp_path and extracted_tmp_path != original_tmp_path:
                 os.remove(extracted_tmp_path)
-        except Exception as cleanup_error:
-            app.logger.warning(f"Failed to clean up temp files: {cleanup_error}")
+        except Exception:
+            pass  # Silent cleanup
 
-    # Initialize job status
+    # Initialize job tracking
     extracted_texts[job_id] = {
         'text': None,
         'timestamp': time.time(),
         'status': 'processing'
     }
 
-    # Parse page parameters
-    page_from_int = None
-    page_to_int = None
-    try:
-        if page_from:
-            page_from_int = int(page_from)
-        if page_to:
-            page_to_int = int(page_to)
-    except ValueError:
-        return {'error': 'Invalid page numbers provided'}, 400
-
-    # Start OCR processing in background (in production, use a task queue like Celery)
+    # Step 3: OCR Processing
     try:
         extract_text_with_mistral_ocr(blob_url, job_id, page_from_int, page_to_int)
-    except Exception as e:
-        app.logger.error(f"Failed to start OCR processing: {str(e)}")
-        return {'error': f'Failed to start OCR processing: {str(e)}'}, 500
 
-    # Return job_id for tracking
-    return {'status': 'received', 'job_id': job_id, 'blob_url': blob_url}, 200
+        total_time = time.time() - start_time
+        logger.info(f"PDF processing pipeline completed in {total_time:.2f}s - Job: {job_id}")
+
+        return {'status': 'received', 'job_id': job_id, 'blob_url': blob_url}, 200
+    except Exception as e:
+        logger.error(f"OCR processing failed: {str(e)}")
+        return {'error': f'Failed to start OCR processing: {str(e)}'}, 500
 
 @app.route('/ocr-status/<job_id>', methods=['GET'])
 def get_ocr_status(job_id):

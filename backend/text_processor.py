@@ -5,6 +5,7 @@ Handles cleaning, structuring, and metadata extraction from OCR text
 """
 import re
 import logging
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
@@ -73,8 +74,9 @@ class TextProcessor:
         Returns:
             Dictionary containing structured text and metadata
         """
+        start_time = time.time()
         logger.info(f"Processing text: {len(raw_text)} characters, pages {page_from}-{page_to}")
-        
+
         # Step 1: Parse pages from OCR response
         pages = self._parse_pages(raw_text)
         logger.info(f"Parsed {len(pages)} pages from OCR response")

@@ -5,6 +5,7 @@ Handles tokenization and chunking of structured text with overlap and metadata
 """
 import logging
 import uuid
+import time
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 import tiktoken
@@ -118,8 +119,9 @@ class TextChunker:
         Returns:
             List of TextChunk objects
         """
+        start_time = time.time()
         logger.info("Starting text chunking process")
-        
+
         segments = structured_data.get('segments', [])
         if not segments:
             logger.warning("No segments found in structured data")
